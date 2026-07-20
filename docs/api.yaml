@@ -1,0 +1,91 @@
+openapi: "3.1.0"
+info:
+  title: Workshop Billing Service
+  version: "0.1.0"
+  description: Billing Service for FIAP Tech Challenge Phase 4. Handles billing records, invoices, and payment event ingestion.
+servers:
+  - url: http://localhost:3000
+    description: Local development
+
+paths:
+  /health:
+    get:
+      summary: Liveness probe
+      operationId: getHealth
+      responses:
+        "200":
+          description: Service is alive
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /ready:
+    get:
+      summary: Readiness probe
+      description: Checks whether the Billing Service can reach its own PostgreSQL database.
+      operationId: getReady
+      responses:
+        "200":
+          description: Service is ready to accept traffic
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadyResponse"
+        "503":
+          description: Service is not ready because PostgreSQL is unconfigured or unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotReadyResponse"
+
+components:
+  schemas:
+    HealthResponse:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          const: ok
+    ReadyResponse:
+      type: object
+      required:
+        - status
+        - checks
+      properties:
+        status:
+          type: string
+          const: ready
+        checks:
+          $ref: "#/components/schemas/ReadinessChecks"
+    NotReadyResponse:
+      type: object
+      required:
+        - status
+        - checks
+      properties:
+        status:
+          type: string
+          const: not_ready
+        checks:
+          $ref: "#/components/schemas/ReadinessChecks"
+    ReadinessChecks:
+      type: object
+      required:
+        - database
+      properties:
+        database:
+          type: object
+          required:
+            - status
+          properties:
+            status:
+              type: string
+              enum:
+                - ok
+                - unconfigured
+                - unavailable
+            detail:
+              type: string

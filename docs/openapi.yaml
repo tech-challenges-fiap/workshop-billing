@@ -1,0 +1,268 @@
+openapi: 3.0.3
+info:
+  title: Workshop Billing Service
+  version: 0.1.0
+paths:
+  /health:
+    get:
+      summary: Liveness probe
+      responses:
+        "200":
+          description: Service is alive
+  /ready:
+    get:
+      summary: Readiness probe
+      responses:
+        "200":
+          description: Service and PostgreSQL are ready
+        "503":
+          description: PostgreSQL is unconfigured or unavailable
+  /billing-records:
+    post:
+      summary: Create or replay a billing record
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateBillingRecordRequest"
+      responses:
+        "201":
+          description: Billing record created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BillingRecordResponse"
+        "200":
+          description: Existing billing record returned for the idempotency key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BillingRecordResponse"
+        "400":
+          description: Request validation failed
+        "503":
+          description: Billing persistence is not configured
+  /billing-records/{billingRecordId}/quote:
+    get:
+      summary: Read a payable billing quote
+      parameters:
+        - $ref: "#/components/parameters/BillingRecordId"
+      responses:
+        "200":
+          description: Billing quote
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [quote]
+                properties:
+                  quote:
+                    $ref: "#/components/schemas/BillingQuote"
+        "404":
+          description: Billing record not found
+  /billing-records/{billingRecordId}/payment-attempts:
+    post:
+      summary: Create or replay a gateway-agnostic payment attempt
+      parameters:
+        - $ref: "#/components/parameters/BillingRecordId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreatePaymentAttemptRequest"
+      responses:
+        "201":
+          description: Payment attempt created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentAttemptResponse"
+        "200":
+          description: Existing attempt returned for the idempotency key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentAttemptResponse"
+        "400":
+          description: Request validation failed
+        "404":
+          description: Billing record not found
+  /billing-records/{billingRecordId}/payment-attempts/{attemptId}/status:
+    post:
+      summary: Report payment attempt status
+      parameters:
+        - $ref: "#/components/parameters/BillingRecordId"
+        - name: attemptId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  $ref: "#/components/schemas/PaymentAttemptStatus"
+      responses:
+        "200":
+          description: Status updated
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [paymentAttempt, billingRecord]
+                properties:
+                  paymentAttempt:
+                    $ref: "#/components/schemas/PaymentAttempt"
+                  billingRecord:
+                    $ref: "#/components/schemas/BillingRecord"
+        "400":
+          description: Request validation failed
+        "404":
+          description: Billing record or attempt not found
+components:
+  parameters:
+    BillingRecordId:
+      name: billingRecordId
+      in: path
+      required: true
+      schema:
+        type: string
+  schemas:
+    CreateBillingRecordRequest:
+      type: object
+      required: [orderId, customerId, amountCents, currency, idempotencyKey, correlationId]
+      properties:
+        orderId:
+          type: string
+        customerId:
+          type: string
+        amountCents:
+          type: integer
+          minimum: 1
+        currency:
+          type: string
+          minLength: 3
+          maxLength: 3
+        idempotencyKey:
+          type: string
+        correlationId:
+          type: string
+    BillingRecordStatus:
+      type: string
+      enum: [pending, processing, paid, failed, canceled]
+    PaymentAttemptStatus:
+      type: string
+      enum: [pending, processing, succeeded, failed, canceled]
+    BillingRecord:
+      type: object
+      required: [id, orderId, customerId, amountCents, currency, status, idempotencyKey, correlationId, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+        orderId:
+          type: string
+        customerId:
+          type: string
+        amountCents:
+          type: integer
+        currency:
+          type: string
+        status:
+          $ref: "#/components/schemas/BillingRecordStatus"
+        idempotencyKey:
+          type: string
+        correlationId:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    BillingRecordResponse:
+      type: object
+      required: [billingRecord, idempotentReplay]
+      properties:
+        billingRecord:
+          $ref: "#/components/schemas/BillingRecord"
+        idempotentReplay:
+          type: boolean
+    BillingQuote:
+      type: object
+      required: [billingRecordId, orderId, customerId, amountCents, currency, status, canAttemptPayment, correlationId]
+      properties:
+        billingRecordId:
+          type: string
+        orderId:
+          type: string
+        customerId:
+          type: string
+        amountCents:
+          type: integer
+        currency:
+          type: string
+        status:
+          $ref: "#/components/schemas/BillingRecordStatus"
+        canAttemptPayment:
+          type: boolean
+        correlationId:
+          type: string
+    CreatePaymentAttemptRequest:
+      type: object
+      required: [idempotencyKey, correlationId]
+      properties:
+        provider:
+          type: string
+        providerReference:
+          type: string
+        idempotencyKey:
+          type: string
+        correlationId:
+          type: string
+        metadata:
+          type: object
+          additionalProperties: true
+    PaymentAttempt:
+      type: object
+      required: [id, billingRecordId, status, provider, providerReference, idempotencyKey, correlationId, metadata, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+        billingRecordId:
+          type: string
+        status:
+          $ref: "#/components/schemas/PaymentAttemptStatus"
+        provider:
+          type: string
+          nullable: true
+        providerReference:
+          type: string
+          nullable: true
+        idempotencyKey:
+          type: string
+        correlationId:
+          type: string
+        metadata:
+          type: object
+          additionalProperties: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    PaymentAttemptResponse:
+      type: object
+      required: [paymentAttempt, idempotentReplay]
+      properties:
+        paymentAttempt:
+          $ref: "#/components/schemas/PaymentAttempt"
+        idempotentReplay:
+          type: boolean
