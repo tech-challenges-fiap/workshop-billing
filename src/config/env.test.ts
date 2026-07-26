@@ -49,6 +49,39 @@ describe("getAppConfig", () => {
     });
   });
 
+  it("leaves mercadopago unconfigured when MERCADOPAGO_ACCESS_TOKEN is absent", () => {
+    expect(getAppConfig({}).mercadopago).toBeUndefined();
+  });
+
+  it("maps mercadopago config with a documented default base URL", () => {
+    expect(
+      getAppConfig({
+        MERCADOPAGO_ACCESS_TOKEN: "TEST-access-token",
+      }),
+    ).toEqual({
+      port: 3000,
+      mercadopago: {
+        accessToken: "TEST-access-token",
+        baseUrl: "https://api.mercadopago.com",
+      },
+    });
+  });
+
+  it("allows overriding the mercadopago base URL", () => {
+    expect(
+      getAppConfig({
+        MERCADOPAGO_ACCESS_TOKEN: "TEST-access-token",
+        MERCADOPAGO_BASE_URL: "https://sandbox.mercadopago.example",
+      }),
+    ).toEqual({
+      port: 3000,
+      mercadopago: {
+        accessToken: "TEST-access-token",
+        baseUrl: "https://sandbox.mercadopago.example",
+      },
+    });
+  });
+
   it("rejects invalid positive integer settings", () => {
     expect(() => getAppConfig({ PORT: "0" })).toThrow("PORT must be a positive integer");
     expect(() =>

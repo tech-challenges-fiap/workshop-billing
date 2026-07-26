@@ -1,4 +1,5 @@
 import { type Context, Hono } from "hono";
+import type { PaymentGateway } from "../gateways/payment-gateway";
 import {
   type BillingRecord,
   type BillingRecordStatus,
@@ -39,6 +40,14 @@ export type PaymentAttemptReaderWriter = {
 type BillingRoutesOptions = {
   billingRepository?: BillingRecordReaderWriter;
   paymentAttemptRepository?: PaymentAttemptReaderWriter;
+  /**
+   * Optional concrete payment gateway (e.g. Mercado Pago). When absent the
+   * payment-attempt contract stays gateway-agnostic exactly as before: callers
+   * supply their own opaque `provider`/`providerReference`. When present, the
+   * service charges through the gateway at creation time and can resolve
+   * status updates (e.g. from a webhook) by querying the gateway directly.
+   */
+  paymentGateway?: PaymentGateway;
 };
 
 type ValidationError = {
@@ -198,6 +207,12 @@ function validatePaymentAttemptCreate(body: Record<string, unknown> | null): Val
       message: "providerReference must be a non-empty string when provided",
     });
   }
+  if (!optionalNonEmptyString(body.payerEmail)) {
+    errors.push({
+      field: "payerEmail",
+      message: "payerEmail must be a non-empty string when provided",
+    });
+  }
   if (body.metadata !== undefined && !isObject(body.metadata)) {
     errors.push({ field: "metadata", message: "metadata must be an object when provided" });
   }
@@ -205,18 +220,39 @@ function validatePaymentAttemptCreate(body: Record<string, unknown> | null): Val
   return errors;
 }
 
+/**
+ * The status-report contract accepts either an explicit gateway-agnostic
+ * `status` (unchanged legacy behavior), or a `providerReference` identifying
+ * a provider-side payment so the configured payment gateway can be queried
+ * for the authoritative status. The latter is how a Mercado Pago webhook
+ * notification (which only reliably carries a payment id) is translated into
+ * a status update without trusting an unauthenticated webhook body directly.
+ */
 function validatePaymentStatus(body: Record<string, unknown> | null): ValidationError[] {
   if (!body) {
     return [{ field: "body", message: "JSON object body is required" }];
   }
-  if (
-    !isNonEmptyString(body.status) ||
-    !paymentAttemptStatuses.includes(body.status as PaymentAttemptStatus)
-  ) {
+
+  if (body.status !== undefined) {
+    if (
+      !isNonEmptyString(body.status) ||
+      !paymentAttemptStatuses.includes(body.status as PaymentAttemptStatus)
+    ) {
+      return [
+        {
+          field: "status",
+          message: "status must be one of pending, processing, succeeded, failed, canceled",
+        },
+      ];
+    }
+    return [];
+  }
+
+  if (!isNonEmptyString(body.providerReference)) {
     return [
       {
         field: "status",
-        message: "status must be one of pending, processing, succeeded, failed, canceled",
+        message: "status is required, or providerReference to resolve status via the gateway",
       },
     ];
   }
@@ -311,18 +347,64 @@ export function createBillingRoutes(options: BillingRoutesOptions): Hono {
       );
     }
 
+    const idempotencyKey = body.idempotencyKey as string;
+    const correlationId = body.correlationId as string;
+    let provider = body.provider as string | undefined;
+    let providerReference = body.providerReference as string | undefined;
+    let status: PaymentAttemptStatus = "pending";
+    let metadata = body.metadata as Record<string, unknown> | undefined;
+    let updatedBillingRecord: BillingRecord | undefined;
+
+    if (options.paymentGateway) {
+      provider = options.paymentGateway.provider;
+      try {
+        const chargeResult = await options.paymentGateway.charge({
+          billingRecordId,
+          orderId: record.orderId,
+          customerId: record.customerId,
+          amountCents: record.amountCents,
+          currency: record.currency,
+          idempotencyKey,
+          correlationId,
+          payerEmail: body.payerEmail as string | undefined,
+          metadata,
+        });
+        providerReference = chargeResult.providerReference;
+        status = chargeResult.status;
+        metadata = { ...(metadata ?? {}), gateway: chargeResult.raw ?? {} };
+      } catch (error) {
+        status = "failed";
+        metadata = {
+          ...(metadata ?? {}),
+          gatewayError: error instanceof Error ? error.message : "Unknown gateway error",
+        };
+      }
+
+      updatedBillingRecord =
+        (await options.billingRepository.updateStatus(
+          billingRecordId,
+          billingStatusForAttemptStatus(status),
+        )) ?? undefined;
+    }
+
     const attempt = await options.paymentAttemptRepository.create({
       billingRecordId,
-      status: "pending",
-      provider: body.provider as string | undefined,
-      providerReference: body.providerReference as string | undefined,
-      idempotencyKey: body.idempotencyKey as string,
-      correlationId: body.correlationId as string,
-      metadata: body.metadata as Record<string, unknown> | undefined,
+      status,
+      provider,
+      providerReference,
+      idempotencyKey,
+      correlationId,
+      metadata,
     });
 
     return c.json(
-      { paymentAttempt: serializePaymentAttempt(attempt), idempotentReplay: false },
+      {
+        paymentAttempt: serializePaymentAttempt(attempt),
+        idempotentReplay: false,
+        ...(updatedBillingRecord
+          ? { billingRecord: serializeBillingRecord(updatedBillingRecord) }
+          : {}),
+      },
       201,
     );
   });
@@ -350,7 +432,39 @@ export function createBillingRoutes(options: BillingRoutesOptions): Hono {
       return notFoundResponse(c, "Payment attempt not found");
     }
 
-    const status = body.status as PaymentAttemptStatus;
+    let status: PaymentAttemptStatus;
+    if (isNonEmptyString(body.status)) {
+      status = body.status as PaymentAttemptStatus;
+    } else if (options.paymentGateway) {
+      try {
+        const gatewayStatus = await options.paymentGateway.getStatus(
+          body.providerReference as string,
+        );
+        status = gatewayStatus.status;
+      } catch (error) {
+        return c.json(
+          {
+            error: {
+              code: "gateway_error",
+              message:
+                error instanceof Error ? error.message : "Payment gateway status lookup failed",
+            },
+          },
+          502,
+        );
+      }
+    } else {
+      return c.json(
+        {
+          error: {
+            code: "gateway_unconfigured",
+            message: "A payment gateway must be configured to resolve status by providerReference",
+          },
+        },
+        503,
+      );
+    }
+
     const updatedAttempt = await options.paymentAttemptRepository.updateStatus(attemptId, status);
     const updatedBilling = await options.billingRepository.updateStatus(
       billingRecordId,

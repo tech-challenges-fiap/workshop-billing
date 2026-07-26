@@ -34,7 +34,12 @@ All non-trivial changes require an OpenSpec change under `openspec/changes/<id>/
 ## Boundaries
 
 - Do not share models or schemas with other services; duplicate types explicitly.
-- Do not implement payment gateway integration in this scaffold phase.
+- Fase 4 now implements a concrete payment gateway integration (Mercado Pago) behind the
+  `PaymentGateway` interface in `src/gateways/`. The earlier "do not implement a payment
+  gateway" rule was a scaffold-phase decision and no longer applies — it has been
+  superseded by `openspec/changes/f4-billing-mercadopago-gateway`. The integration remains
+  optional/opt-in: it is only wired in `src/index.ts` when `MERCADOPAGO_ACCESS_TOKEN` is
+  configured, so the service still runs gateway-agnostic in environments without it.
 - Expose only HTTP/REST endpoints; event consumers are internal.
 
 ## When Adding Features
