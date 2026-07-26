@@ -1,0 +1,8 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: billing-service
+spec:
+  # Explicit pin (redundant with base today) so prod's floor stays 2 even if
+  # a future change to k8s/base/hpa.yaml lowers the shared default.
+  minReplicas: 2
