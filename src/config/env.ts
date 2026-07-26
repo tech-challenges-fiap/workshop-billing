@@ -15,10 +15,16 @@ export type RabbitMqConfig = {
   consumersEnabled: boolean;
 };
 
+export type MercadoPagoConfig = {
+  accessToken: string;
+  baseUrl: string;
+};
+
 export type AppConfig = {
   port: number;
   database?: DatabaseConfig;
   rabbitmq?: RabbitMqConfig;
+  mercadopago?: MercadoPagoConfig;
 };
 
 type EnvSource = Record<string, string | undefined>;
@@ -36,6 +42,7 @@ const DEFAULT_COMPENSATION_ROUTING_KEYS = [
 ];
 const DEFAULT_STATUS_ROUTING_KEY = "billing.payment.status.changed";
 const DEFAULT_COMPENSATION_RESULT_ROUTING_KEY = "billing.payment.compensation.completed";
+const DEFAULT_MERCADOPAGO_BASE_URL = "https://api.mercadopago.com";
 
 function parsePositiveInteger(value: string | undefined, name: string, fallback: number): number {
   if (value === undefined || value.trim() === "") {
@@ -94,14 +101,30 @@ function getRabbitMqConfig(env: EnvSource): RabbitMqConfig | undefined {
   };
 }
 
+function getMercadoPagoConfig(env: EnvSource): MercadoPagoConfig | undefined {
+  const accessToken = env.MERCADOPAGO_ACCESS_TOKEN?.trim();
+  if (!accessToken) {
+    return undefined;
+  }
+
+  return {
+    accessToken,
+    baseUrl: env.MERCADOPAGO_BASE_URL?.trim() || DEFAULT_MERCADOPAGO_BASE_URL,
+  };
+}
+
 export function getAppConfig(env: EnvSource = process.env): AppConfig {
   const port = parsePositiveInteger(env.PORT, "PORT", DEFAULT_PORT);
   const databaseUrl = env.DATABASE_URL?.trim();
   const rabbitmq = getRabbitMqConfig(env);
+  const mercadopago = getMercadoPagoConfig(env);
 
   const baseConfig: AppConfig = { port };
   if (rabbitmq) {
     baseConfig.rabbitmq = rabbitmq;
+  }
+  if (mercadopago) {
+    baseConfig.mercadopago = mercadopago;
   }
 
   if (!databaseUrl) {

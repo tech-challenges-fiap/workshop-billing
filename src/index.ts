@@ -6,6 +6,8 @@ import {
   UnconfiguredDatabaseChecker,
   createPostgresPool,
 } from "./database/postgres";
+import { MercadoPagoGateway } from "./gateways/mercadopago-gateway";
+import type { PaymentGateway } from "./gateways/payment-gateway";
 import { startRabbitMqRuntime } from "./messaging/rabbitmq";
 import { BillingRepository, PaymentAttemptRepository } from "./repositories/billing";
 import {
@@ -19,6 +21,7 @@ type AppOptions = {
   databaseChecker: DatabaseChecker;
   billingRepository?: BillingRecordReaderWriter;
   paymentAttemptRepository?: PaymentAttemptReaderWriter;
+  paymentGateway?: PaymentGateway;
 };
 
 export function createApp(options: AppOptions): Hono {
@@ -29,6 +32,7 @@ export function createApp(options: AppOptions): Hono {
     createBillingRoutes({
       billingRepository: options.billingRepository,
       paymentAttemptRepository: options.paymentAttemptRepository,
+      paymentGateway: options.paymentGateway,
     }),
   );
   return app;
@@ -41,10 +45,14 @@ const databaseChecker = pool
   : new UnconfiguredDatabaseChecker();
 const billingRepository = pool ? new BillingRepository(pool) : undefined;
 const paymentAttemptRepository = pool ? new PaymentAttemptRepository(pool) : undefined;
+// Optional and disabled by default: only wired when MERCADOPAGO_ACCESS_TOKEN is
+// configured. When absent, payment-attempt creation stays gateway-agnostic.
+const paymentGateway = config.mercadopago ? new MercadoPagoGateway(config.mercadopago) : undefined;
 const app = createApp({
   databaseChecker,
   billingRepository,
   paymentAttemptRepository,
+  paymentGateway,
 });
 
 if (config.rabbitmq?.consumersEnabled && billingRepository && paymentAttemptRepository) {
