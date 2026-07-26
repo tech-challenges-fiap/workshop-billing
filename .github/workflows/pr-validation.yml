@@ -21,11 +21,23 @@ jobs:
       - name: Lint
         run: bun run lint
       - name: Test
-        run: bun test
+        run: bun run test:coverage
       - name: Build
         run: bun run build
       - name: Docker build
         run: docker build -t workshop-billing:ci .
+      # SONAR_TOKEN is not yet configured for this repository (a human must run
+      # `gh secret set SONAR_TOKEN --repo tech-challenges-fiap/workshop-billing`).
+      # `ci` is a required status check for stag/prod branch protection, so
+      # continue-on-error keeps this step from failing the required job while
+      # the secret is missing. Remove continue-on-error once SONAR_TOKEN exists
+      # and the scan is expected to succeed reliably.
+      - name: Sonar
+        uses: SonarSource/sonarqube-scan-action@v8.2.1
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
   k8s:
     name: k8s
