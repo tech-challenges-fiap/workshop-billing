@@ -112,6 +112,18 @@ function unavailableResponse(c: Context) {
   );
 }
 
+function notAttemptableResponse(c: Context, status: BillingRecordStatus) {
+  return c.json(
+    {
+      error: {
+        code: "payment_not_attemptable",
+        message: `Billing record status '${status}' does not allow new payment attempts`,
+      },
+    },
+    409,
+  );
+}
+
 function serializeBillingRecord(record: BillingRecord) {
   return {
     id: record.id,
@@ -356,6 +368,10 @@ export function createBillingRoutes(options: BillingRoutesOptions): Hono {
     let updatedBillingRecord: BillingRecord | undefined;
 
     if (options.paymentGateway) {
+      if (!mayAttemptPayment(record.status)) {
+        return notAttemptableResponse(c, record.status);
+      }
+
       provider = options.paymentGateway.provider;
       try {
         const chargeResult = await options.paymentGateway.charge({
@@ -440,6 +456,17 @@ export function createBillingRoutes(options: BillingRoutesOptions): Hono {
         const gatewayStatus = await options.paymentGateway.getStatus(
           body.providerReference as string,
         );
+        if (gatewayStatus.providerReference !== attempt.providerReference) {
+          return c.json(
+            {
+              error: {
+                code: "provider_reference_mismatch",
+                message: "Resolved payment gateway reference does not match this payment attempt",
+              },
+            },
+            409,
+          );
+        }
         status = gatewayStatus.status;
       } catch (error) {
         return c.json(

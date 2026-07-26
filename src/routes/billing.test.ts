@@ -432,9 +432,66 @@ describe("billing payment contract routes", () => {
       expect(billingRepository.updates).toEqual([{ id: billingRecord.id, status: "failed" }]);
     });
 
+    it("rejects a gateway charge when the billing record is already paid", async () => {
+      const paidRecord: BillingRecord = { ...billingRecord, status: "paid" };
+      const billingRepository = new FakeBillingRepository(paidRecord);
+      const paymentAttemptRepository = new FakePaymentAttemptRepository();
+      const paymentGateway = new FakePaymentGateway();
+      const app = createBillingRoutes({
+        billingRepository,
+        paymentAttemptRepository,
+        paymentGateway,
+      });
+
+      const response = await app.request(`/billing-records/${billingRecord.id}/payment-attempts`, {
+        method: "POST",
+        body: JSON.stringify({ idempotencyKey: "pay-idem-new", correlationId: "corr-1" }),
+        headers: { "content-type": "application/json" },
+      });
+
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toMatchObject({
+        error: { code: "payment_not_attemptable" },
+      });
+      expect(paymentGateway.chargeCalls).toEqual([]);
+      expect(paymentAttemptRepository.created).toEqual([]);
+      expect(billingRepository.updates).toEqual([]);
+    });
+
+    it("rejects a gateway charge when the billing record is already canceled", async () => {
+      const canceledRecord: BillingRecord = { ...billingRecord, status: "canceled" };
+      const billingRepository = new FakeBillingRepository(canceledRecord);
+      const paymentAttemptRepository = new FakePaymentAttemptRepository();
+      const paymentGateway = new FakePaymentGateway();
+      const app = createBillingRoutes({
+        billingRepository,
+        paymentAttemptRepository,
+        paymentGateway,
+      });
+
+      const response = await app.request(`/billing-records/${billingRecord.id}/payment-attempts`, {
+        method: "POST",
+        body: JSON.stringify({ idempotencyKey: "pay-idem-new", correlationId: "corr-1" }),
+        headers: { "content-type": "application/json" },
+      });
+
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toMatchObject({
+        error: { code: "payment_not_attemptable" },
+      });
+      expect(paymentGateway.chargeCalls).toEqual([]);
+      expect(paymentAttemptRepository.created).toEqual([]);
+      expect(billingRepository.updates).toEqual([]);
+    });
+
     it("resolves status via the gateway when reporting a providerReference (webhook style)", async () => {
       const billingRepository = new FakeBillingRepository();
-      const paymentAttemptRepository = new FakePaymentAttemptRepository();
+      // The attempt must already carry the provider reference the gateway will
+      // resolve to (e.g. set at charge time) for the webhook-style update to apply.
+      const paymentAttemptRepository = new FakePaymentAttemptRepository({
+        ...paymentAttempt,
+        providerReference: "mp-ref-1",
+      });
       const paymentGateway = new FakePaymentGateway();
       const app = createBillingRoutes({
         billingRepository,
@@ -457,6 +514,37 @@ describe("billing payment contract routes", () => {
         billingRecord: { status: "paid" },
       });
       expect(paymentGateway.statusCalls).toEqual(["mp-ref-1"]);
+    });
+
+    it("rejects a status update when the resolved provider reference does not match the attempt", async () => {
+      const billingRepository = new FakeBillingRepository();
+      // Default fixture attempt has providerReference "provider-ref-1", while the
+      // gateway (and the caller's request) resolve to "mp-ref-1" — a mismatch that
+      // must be rejected instead of applying the status to the wrong attempt.
+      const paymentAttemptRepository = new FakePaymentAttemptRepository();
+      const paymentGateway = new FakePaymentGateway();
+      const app = createBillingRoutes({
+        billingRepository,
+        paymentAttemptRepository,
+        paymentGateway,
+      });
+
+      const response = await app.request(
+        `/billing-records/${billingRecord.id}/payment-attempts/${paymentAttempt.id}/status`,
+        {
+          method: "POST",
+          body: JSON.stringify({ providerReference: "mp-ref-1" }),
+          headers: { "content-type": "application/json" },
+        },
+      );
+
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toMatchObject({
+        error: { code: "provider_reference_mismatch" },
+      });
+      expect(paymentGateway.statusCalls).toEqual(["mp-ref-1"]);
+      expect(paymentAttemptRepository.updates).toEqual([]);
+      expect(billingRepository.updates).toEqual([]);
     });
 
     it("returns a gateway error response when the gateway status lookup fails", async () => {

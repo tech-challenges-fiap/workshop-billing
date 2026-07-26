@@ -89,6 +89,10 @@ paths:
           description: Request validation failed
         "404":
           description: Billing record not found
+        "409":
+          description: >-
+            A payment gateway is configured and the billing record status does not allow
+            new payment attempts (e.g. already paid or canceled)
   /billing-records/{billingRecordId}/payment-attempts/{attemptId}/status:
     post:
       summary: Report payment attempt status, or resolve it via the configured gateway from a providerReference
@@ -136,6 +140,10 @@ paths:
           description: Request validation failed
         "404":
           description: Billing record or attempt not found
+        "409":
+          description: >-
+            The provider reference resolved by the payment gateway does not match the
+            provider reference stored on this payment attempt
         "502":
           description: The configured payment gateway failed to resolve status for the providerReference
         "503":

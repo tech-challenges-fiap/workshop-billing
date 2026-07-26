@@ -58,6 +58,15 @@ exactly as before.
 - **AND** the response is still HTTP 201, since the payment-attempt resource was created
 - **AND** the billing record status is updated to reflect the failed attempt
 
+#### Scenario: Gateway charge is rejected for an already-settled billing record
+
+- **GIVEN** a billing record whose status is `paid` or `canceled` and a configured
+  `PaymentGateway`
+- **WHEN** a client calls `POST /billing-records/{billingRecordId}/payment-attempts` with
+  a new idempotency key
+- **THEN** the service returns HTTP 409 without calling the gateway's charge operation
+- **AND** no payment attempt is persisted and no billing record status is changed
+
 #### Scenario: Payment status is reported
 
 - **GIVEN** an existing payment attempt for a billing record
@@ -92,6 +101,16 @@ exactly as before.
 - **WHEN** a client calls the status endpoint
 - **THEN** the service returns HTTP 502 and does not update any payment attempt or
   billing record status
+
+#### Scenario: Status resolution is rejected when the resolved reference does not match the attempt
+
+- **GIVEN** a status report using `providerReference` with a configured `PaymentGateway`,
+  where the gateway resolves that reference to a value different from the provider
+  reference stored on the payment attempt identified by the URL
+- **WHEN** a client calls the status endpoint
+- **THEN** the service returns HTTP 409 without updating that payment attempt or its
+  billing record status, so a stale or misrouted reference cannot be applied to the
+  wrong attempt
 
 ### Requirement: Gateway-agnostic payment persistence boundary
 
