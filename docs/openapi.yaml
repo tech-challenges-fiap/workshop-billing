@@ -63,7 +63,7 @@ paths:
           description: Billing record not found
   /billing-records/{billingRecordId}/payment-attempts:
     post:
-      summary: Create or replay a gateway-agnostic payment attempt
+      summary: Create or replay a payment attempt, charging through the configured gateway when set up
       parameters:
         - $ref: "#/components/parameters/BillingRecordId"
       requestBody:
@@ -89,9 +89,13 @@ paths:
           description: Request validation failed
         "404":
           description: Billing record not found
+        "409":
+          description: >-
+            A payment gateway is configured and the billing record status does not allow
+            new payment attempts (e.g. already paid or canceled)
   /billing-records/{billingRecordId}/payment-attempts/{attemptId}/status:
     post:
-      summary: Report payment attempt status
+      summary: Report payment attempt status, or resolve it via the configured gateway from a providerReference
       parameters:
         - $ref: "#/components/parameters/BillingRecordId"
         - name: attemptId
@@ -104,11 +108,21 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              required: [status]
-              properties:
-                status:
-                  $ref: "#/components/schemas/PaymentAttemptStatus"
+              oneOf:
+                - type: object
+                  required: [status]
+                  properties:
+                    status:
+                      $ref: "#/components/schemas/PaymentAttemptStatus"
+                - type: object
+                  required: [providerReference]
+                  properties:
+                    providerReference:
+                      type: string
+                      description: >-
+                        Provider-side payment id (e.g. from a Mercado Pago webhook) used to
+                        resolve the authoritative status via the configured payment gateway
+                        instead of trusting a client-supplied status.
       responses:
         "200":
           description: Status updated
@@ -126,6 +140,14 @@ paths:
           description: Request validation failed
         "404":
           description: Billing record or attempt not found
+        "409":
+          description: >-
+            The provider reference resolved by the payment gateway does not match the
+            provider reference stored on this payment attempt
+        "502":
+          description: The configured payment gateway failed to resolve status for the providerReference
+        "503":
+          description: providerReference was supplied but no payment gateway is configured
 components:
   parameters:
     BillingRecordId:
@@ -220,12 +242,19 @@ components:
       properties:
         provider:
           type: string
+          description: >-
+            Ignored and overwritten with the configured gateway's provider name when a
+            payment gateway is set up; otherwise stored as supplied (gateway-agnostic mode).
         providerReference:
           type: string
+          description: Same override behavior as `provider` when a payment gateway is configured.
         idempotencyKey:
           type: string
         correlationId:
           type: string
+        payerEmail:
+          type: string
+          description: Optional payer email forwarded to the configured payment gateway's charge call.
         metadata:
           type: object
           additionalProperties: true
@@ -266,3 +295,7 @@ components:
           $ref: "#/components/schemas/PaymentAttempt"
         idempotentReplay:
           type: boolean
+        billingRecord:
+          description: Present when a payment gateway is configured and the charge updated billing status.
+          allOf:
+            - $ref: "#/components/schemas/BillingRecord"

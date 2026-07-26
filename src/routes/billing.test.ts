@@ -1,5 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import type {
+  PaymentChargeInput,
+  PaymentChargeResult,
+  PaymentGateway,
+  PaymentStatusResult,
+} from "../gateways/payment-gateway";
+import type {
   BillingRecord,
   BillingRecordStatus,
   PaymentAttempt,
@@ -111,6 +117,47 @@ class FakePaymentAttemptRepository implements PaymentAttemptReaderWriter {
     }
     this.attemptById = { ...this.attemptById, status };
     return this.attemptById;
+  }
+}
+
+/**
+ * Hand-rolled `PaymentGateway` test double (no mocking library, matching this
+ * repo's existing fake-repository style) so route wiring can be exercised for
+ * a successful charge, a failed charge, and a webhook-driven status query
+ * without needing real Mercado Pago credentials.
+ */
+class FakePaymentGateway implements PaymentGateway {
+  readonly provider = "mercadopago";
+  chargeCalls: PaymentChargeInput[] = [];
+  statusCalls: string[] = [];
+
+  constructor(
+    private chargeResult: PaymentChargeResult | Error = {
+      providerReference: "mp-ref-1",
+      status: "succeeded",
+      raw: { id: "mp-ref-1", status: "approved" },
+    },
+    private statusResult: PaymentStatusResult | Error = {
+      providerReference: "mp-ref-1",
+      status: "succeeded",
+      raw: { id: "mp-ref-1", status: "approved" },
+    },
+  ) {}
+
+  async charge(input: PaymentChargeInput): Promise<PaymentChargeResult> {
+    this.chargeCalls.push(input);
+    if (this.chargeResult instanceof Error) {
+      throw this.chargeResult;
+    }
+    return this.chargeResult;
+  }
+
+  async getStatus(providerReference: string): Promise<PaymentStatusResult> {
+    this.statusCalls.push(providerReference);
+    if (this.statusResult instanceof Error) {
+      throw this.statusResult;
+    }
+    return this.statusResult;
   }
 }
 
@@ -297,5 +344,254 @@ describe("billing payment contract routes", () => {
     expect(response.status).toBe(400);
     expect(paymentAttemptRepository.updates).toEqual([]);
     expect(billingRepository.updates).toEqual([]);
+  });
+
+  describe("with a configured payment gateway", () => {
+    it("charges through the gateway when creating a payment attempt", async () => {
+      const billingRepository = new FakeBillingRepository();
+      const paymentAttemptRepository = new FakePaymentAttemptRepository();
+      const paymentGateway = new FakePaymentGateway();
+      const app = createBillingRoutes({
+        billingRepository,
+        paymentAttemptRepository,
+        paymentGateway,
+      });
+
+      const response = await app.request(`/billing-records/${billingRecord.id}/payment-attempts`, {
+        method: "POST",
+        body: JSON.stringify({
+          idempotencyKey: "pay-idem-1",
+          correlationId: "corr-1",
+          payerEmail: "buyer@example.com",
+        }),
+        headers: { "content-type": "application/json" },
+      });
+
+      expect(response.status).toBe(201);
+      await expect(response.json()).resolves.toMatchObject({
+        idempotentReplay: false,
+        paymentAttempt: {
+          status: "succeeded",
+          provider: "mercadopago",
+          providerReference: "mp-ref-1",
+        },
+        billingRecord: { status: "paid" },
+      });
+
+      expect(paymentGateway.chargeCalls).toEqual([
+        {
+          billingRecordId: billingRecord.id,
+          orderId: billingRecord.orderId,
+          customerId: billingRecord.customerId,
+          amountCents: billingRecord.amountCents,
+          currency: billingRecord.currency,
+          idempotencyKey: "pay-idem-1",
+          correlationId: "corr-1",
+          payerEmail: "buyer@example.com",
+          metadata: undefined,
+        },
+      ]);
+      expect(paymentAttemptRepository.created).toEqual([
+        {
+          billingRecordId: billingRecord.id,
+          status: "succeeded",
+          provider: "mercadopago",
+          providerReference: "mp-ref-1",
+          idempotencyKey: "pay-idem-1",
+          correlationId: "corr-1",
+          metadata: { gateway: { id: "mp-ref-1", status: "approved" } },
+        },
+      ]);
+      expect(billingRepository.updates).toEqual([{ id: billingRecord.id, status: "paid" }]);
+    });
+
+    it("records a failed payment attempt and billing status when the gateway charge throws", async () => {
+      const billingRepository = new FakeBillingRepository();
+      const paymentAttemptRepository = new FakePaymentAttemptRepository();
+      const paymentGateway = new FakePaymentGateway(new Error("card declined"));
+      const app = createBillingRoutes({
+        billingRepository,
+        paymentAttemptRepository,
+        paymentGateway,
+      });
+
+      const response = await app.request(`/billing-records/${billingRecord.id}/payment-attempts`, {
+        method: "POST",
+        body: JSON.stringify({ idempotencyKey: "pay-idem-1", correlationId: "corr-1" }),
+        headers: { "content-type": "application/json" },
+      });
+
+      expect(response.status).toBe(201);
+      await expect(response.json()).resolves.toMatchObject({
+        paymentAttempt: { status: "failed", provider: "mercadopago" },
+        billingRecord: { status: "failed" },
+      });
+      expect(paymentAttemptRepository.created[0]?.metadata).toEqual({
+        gatewayError: "card declined",
+      });
+      expect(billingRepository.updates).toEqual([{ id: billingRecord.id, status: "failed" }]);
+    });
+
+    it("rejects a gateway charge when the billing record is already paid", async () => {
+      const paidRecord: BillingRecord = { ...billingRecord, status: "paid" };
+      const billingRepository = new FakeBillingRepository(paidRecord);
+      const paymentAttemptRepository = new FakePaymentAttemptRepository();
+      const paymentGateway = new FakePaymentGateway();
+      const app = createBillingRoutes({
+        billingRepository,
+        paymentAttemptRepository,
+        paymentGateway,
+      });
+
+      const response = await app.request(`/billing-records/${billingRecord.id}/payment-attempts`, {
+        method: "POST",
+        body: JSON.stringify({ idempotencyKey: "pay-idem-new", correlationId: "corr-1" }),
+        headers: { "content-type": "application/json" },
+      });
+
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toMatchObject({
+        error: { code: "payment_not_attemptable" },
+      });
+      expect(paymentGateway.chargeCalls).toEqual([]);
+      expect(paymentAttemptRepository.created).toEqual([]);
+      expect(billingRepository.updates).toEqual([]);
+    });
+
+    it("rejects a gateway charge when the billing record is already canceled", async () => {
+      const canceledRecord: BillingRecord = { ...billingRecord, status: "canceled" };
+      const billingRepository = new FakeBillingRepository(canceledRecord);
+      const paymentAttemptRepository = new FakePaymentAttemptRepository();
+      const paymentGateway = new FakePaymentGateway();
+      const app = createBillingRoutes({
+        billingRepository,
+        paymentAttemptRepository,
+        paymentGateway,
+      });
+
+      const response = await app.request(`/billing-records/${billingRecord.id}/payment-attempts`, {
+        method: "POST",
+        body: JSON.stringify({ idempotencyKey: "pay-idem-new", correlationId: "corr-1" }),
+        headers: { "content-type": "application/json" },
+      });
+
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toMatchObject({
+        error: { code: "payment_not_attemptable" },
+      });
+      expect(paymentGateway.chargeCalls).toEqual([]);
+      expect(paymentAttemptRepository.created).toEqual([]);
+      expect(billingRepository.updates).toEqual([]);
+    });
+
+    it("resolves status via the gateway when reporting a providerReference (webhook style)", async () => {
+      const billingRepository = new FakeBillingRepository();
+      // The attempt must already carry the provider reference the gateway will
+      // resolve to (e.g. set at charge time) for the webhook-style update to apply.
+      const paymentAttemptRepository = new FakePaymentAttemptRepository({
+        ...paymentAttempt,
+        providerReference: "mp-ref-1",
+      });
+      const paymentGateway = new FakePaymentGateway();
+      const app = createBillingRoutes({
+        billingRepository,
+        paymentAttemptRepository,
+        paymentGateway,
+      });
+
+      const response = await app.request(
+        `/billing-records/${billingRecord.id}/payment-attempts/${paymentAttempt.id}/status`,
+        {
+          method: "POST",
+          body: JSON.stringify({ providerReference: "mp-ref-1" }),
+          headers: { "content-type": "application/json" },
+        },
+      );
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({
+        paymentAttempt: { status: "succeeded" },
+        billingRecord: { status: "paid" },
+      });
+      expect(paymentGateway.statusCalls).toEqual(["mp-ref-1"]);
+    });
+
+    it("rejects a status update when the resolved provider reference does not match the attempt", async () => {
+      const billingRepository = new FakeBillingRepository();
+      // Default fixture attempt has providerReference "provider-ref-1", while the
+      // gateway (and the caller's request) resolve to "mp-ref-1" — a mismatch that
+      // must be rejected instead of applying the status to the wrong attempt.
+      const paymentAttemptRepository = new FakePaymentAttemptRepository();
+      const paymentGateway = new FakePaymentGateway();
+      const app = createBillingRoutes({
+        billingRepository,
+        paymentAttemptRepository,
+        paymentGateway,
+      });
+
+      const response = await app.request(
+        `/billing-records/${billingRecord.id}/payment-attempts/${paymentAttempt.id}/status`,
+        {
+          method: "POST",
+          body: JSON.stringify({ providerReference: "mp-ref-1" }),
+          headers: { "content-type": "application/json" },
+        },
+      );
+
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toMatchObject({
+        error: { code: "provider_reference_mismatch" },
+      });
+      expect(paymentGateway.statusCalls).toEqual(["mp-ref-1"]);
+      expect(paymentAttemptRepository.updates).toEqual([]);
+      expect(billingRepository.updates).toEqual([]);
+    });
+
+    it("returns a gateway error response when the gateway status lookup fails", async () => {
+      const billingRepository = new FakeBillingRepository();
+      const paymentAttemptRepository = new FakePaymentAttemptRepository();
+      const paymentGateway = new FakePaymentGateway(undefined, new Error("provider unreachable"));
+      const app = createBillingRoutes({
+        billingRepository,
+        paymentAttemptRepository,
+        paymentGateway,
+      });
+
+      const response = await app.request(
+        `/billing-records/${billingRecord.id}/payment-attempts/${paymentAttempt.id}/status`,
+        {
+          method: "POST",
+          body: JSON.stringify({ providerReference: "mp-ref-1" }),
+          headers: { "content-type": "application/json" },
+        },
+      );
+
+      expect(response.status).toBe(502);
+      await expect(response.json()).resolves.toMatchObject({
+        error: { code: "gateway_error", message: "provider unreachable" },
+      });
+      expect(paymentAttemptRepository.updates).toEqual([]);
+      expect(billingRepository.updates).toEqual([]);
+    });
+
+    it("rejects a providerReference status report when no gateway is configured", async () => {
+      const billingRepository = new FakeBillingRepository();
+      const paymentAttemptRepository = new FakePaymentAttemptRepository();
+      const app = createBillingRoutes({ billingRepository, paymentAttemptRepository });
+
+      const response = await app.request(
+        `/billing-records/${billingRecord.id}/payment-attempts/${paymentAttempt.id}/status`,
+        {
+          method: "POST",
+          body: JSON.stringify({ providerReference: "mp-ref-1" }),
+          headers: { "content-type": "application/json" },
+        },
+      );
+
+      expect(response.status).toBe(503);
+      await expect(response.json()).resolves.toMatchObject({
+        error: { code: "gateway_unconfigured" },
+      });
+    });
   });
 });

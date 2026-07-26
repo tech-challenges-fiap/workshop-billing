@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: billing-service-config
+data:
+  SERVICE_NAME: "billing-service"
+  PORT: "8080"
+  RABBITMQ_URL: "amqp://rabbitmq.rabbitmq.svc.cluster.local:5672"
+  RABBITMQ_CONSUMERS_ENABLED: "false"

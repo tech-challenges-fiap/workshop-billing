@@ -38,3 +38,18 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+  k8s:
+    name: k8s
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Validate Kubernetes manifests
+        run: |
+          kubectl kustomize k8s/overlays/stag >/tmp/billing-service-stag.yaml
+          kubectl kustomize k8s/overlays/prod >/tmp/billing-service-prod.yaml
