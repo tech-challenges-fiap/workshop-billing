@@ -9,3 +9,4 @@ resources:
 patches:
   - path: runtime-config.yaml
   - path: ingress-patch.yaml
+  - path: hpa-patch.yaml

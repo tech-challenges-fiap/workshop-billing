@@ -1,11 +1,15 @@
 name: Deploy
 
 on:
-  push:
-    branches:
-      - stag
-      - prod
   workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment to deploy"
+        required: true
+        type: choice
+        options:
+          - stag
+          - prod
 
 permissions:
   contents: read
@@ -16,8 +20,25 @@ jobs:
     name: deploy
     runs-on: ubuntu-latest
     environment:
-      name: ${{ github.ref_name == 'stag' && 'staging' || 'production' }}
+      name: ${{ (inputs.environment == 'stag' && 'staging') || (inputs.environment == 'prod' && 'production') || '' }}
     steps:
+      - name: Resolve and validate deploy target
+        run: |
+          set -euo pipefail
+
+          target="${{ inputs.environment }}"
+          if [ "$target" != "stag" ] && [ "$target" != "prod" ]; then
+            echo "::error::Refusing to deploy: '$target' is not 'stag' or 'prod'."
+            exit 1
+          fi
+
+          echo "DEPLOY_TARGET=$target" >> "$GITHUB_ENV"
+          if [ "$target" = "stag" ]; then
+            echo "DEPLOY_NAMESPACE=${{ vars.K8S_NAMESPACE_STAG }}" >> "$GITHUB_ENV"
+          else
+            echo "DEPLOY_NAMESPACE=${{ vars.K8S_NAMESPACE_PROD }}" >> "$GITHUB_ENV"
+          fi
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -71,12 +92,23 @@ jobs:
           : "${POSTGRES_USER:?POSTGRES_USER secret is required}"
           : "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD secret is required}"
 
-          export DATABASE_URL="postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}"
+          # Percent-encode credential components before building the connection
+          # URI: raw secret values may legally contain URI-reserved characters
+          # (":", "/", "@", "?", "#", ...) which would otherwise corrupt the URI.
+          urlencode() {
+            jq -rn --arg v "$1" '$v | @uri'
+          }
+
+          encoded_user="$(urlencode "$POSTGRES_USER")"
+          encoded_password="$(urlencode "$POSTGRES_PASSWORD")"
+          encoded_db="$(urlencode "$POSTGRES_DB")"
+
+          export DATABASE_URL="postgres://${encoded_user}:${encoded_password}@${POSTGRES_HOST}:${POSTGRES_PORT}/${encoded_db}"
           bun run migrate
 
       - name: Apply runtime secret
         env:
-          NAMESPACE: ${{ github.ref_name == 'stag' && vars.K8S_NAMESPACE_STAG || vars.K8S_NAMESPACE_PROD }}
+          NAMESPACE: ${{ env.DEPLOY_NAMESPACE }}
           POSTGRES_HOST: ${{ secrets.POSTGRES_HOST }}
           POSTGRES_PORT: ${{ secrets.POSTGRES_PORT }}
           POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
@@ -91,7 +123,18 @@ jobs:
           : "${POSTGRES_USER:?POSTGRES_USER secret is required}"
           : "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD secret is required}"
 
-          database_url="postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}"
+          # Same percent-encoding as the migration step above, so the secret
+          # written into the cluster is a valid URI regardless of what
+          # characters the generated credentials contain.
+          urlencode() {
+            jq -rn --arg v "$1" '$v | @uri'
+          }
+
+          encoded_user="$(urlencode "$POSTGRES_USER")"
+          encoded_password="$(urlencode "$POSTGRES_PASSWORD")"
+          encoded_db="$(urlencode "$POSTGRES_DB")"
+
+          database_url="postgres://${encoded_user}:${encoded_password}@${POSTGRES_HOST}:${POSTGRES_PORT}/${encoded_db}"
 
           secret_file="$(mktemp)"
           printf 'DATABASE_URL=%s\n' "$database_url" > "$secret_file"
@@ -106,8 +149,8 @@ jobs:
       - name: Deploy Kubernetes manifests
         env:
           IMAGE_URI: ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:${{ github.sha }}
-          OVERLAY: ${{ github.ref_name == 'stag' && 'stag' || 'prod' }}
-          NAMESPACE: ${{ github.ref_name == 'stag' && vars.K8S_NAMESPACE_STAG || vars.K8S_NAMESPACE_PROD }}
+          OVERLAY: ${{ env.DEPLOY_TARGET }}
+          NAMESPACE: ${{ env.DEPLOY_NAMESPACE }}
         run: |
           kubectl kustomize "k8s/overlays/$OVERLAY" > /tmp/billing-service.yaml
           sed -i "s#image: billing-service:latest#image: $IMAGE_URI#g" /tmp/billing-service.yaml
@@ -116,7 +159,7 @@ jobs:
 
       - name: Smoke test deployment
         env:
-          NAMESPACE: ${{ github.ref_name == 'stag' && vars.K8S_NAMESPACE_STAG || vars.K8S_NAMESPACE_PROD }}
+          NAMESPACE: ${{ env.DEPLOY_NAMESPACE }}
         run: |
           set -euo pipefail
 

@@ -7,7 +7,10 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: billing-service
-  minReplicas: 1
+  # Prod's floor. stag patches this down to 1 (hpa-patch.yaml) to save cost;
+  # prod additionally pins it back to 2 explicitly (hpa-patch.yaml) so a
+  # future change to this base value cannot silently reduce prod capacity.
+  minReplicas: 2
   maxReplicas: 3
   metrics:
     - type: Resource

@@ -10,3 +10,4 @@ patches:
   - path: runtime-config.yaml
   - path: ingress-patch.yaml
   - path: replicas-patch.yaml
+  - path: hpa-patch.yaml
