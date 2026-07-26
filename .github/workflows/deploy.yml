@@ -1,0 +1,127 @@
+name: Deploy
+
+on:
+  push:
+    branches:
+      - stag
+      - prod
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    name: deploy
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ github.ref_name == 'stag' && 'staging' || 'production' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ vars.AWS_REGION }}
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build application
+        run: bun run build
+
+      - name: Build container image
+        env:
+          IMAGE_URI: ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:${{ github.sha }}
+        run: |
+          docker build --tag "$IMAGE_URI" .
+          docker push "$IMAGE_URI"
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Configure kubeconfig
+        run: aws eks update-kubeconfig --region "${{ vars.AWS_REGION }}" --name "${{ vars.EKS_CLUSTER_NAME }}"
+
+      - name: Run database migrations
+        env:
+          POSTGRES_HOST: ${{ secrets.POSTGRES_HOST }}
+          POSTGRES_PORT: ${{ secrets.POSTGRES_PORT }}
+          POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
+          POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          : "${POSTGRES_HOST:?POSTGRES_HOST secret is required}"
+          : "${POSTGRES_PORT:?POSTGRES_PORT secret is required}"
+          : "${POSTGRES_DB:?POSTGRES_DB secret is required}"
+          : "${POSTGRES_USER:?POSTGRES_USER secret is required}"
+          : "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD secret is required}"
+
+          export DATABASE_URL="postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}"
+          bun run migrate
+
+      - name: Apply runtime secret
+        env:
+          NAMESPACE: ${{ github.ref_name == 'stag' && vars.K8S_NAMESPACE_STAG || vars.K8S_NAMESPACE_PROD }}
+          POSTGRES_HOST: ${{ secrets.POSTGRES_HOST }}
+          POSTGRES_PORT: ${{ secrets.POSTGRES_PORT }}
+          POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
+          POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          : "${POSTGRES_HOST:?POSTGRES_HOST secret is required}"
+          : "${POSTGRES_PORT:?POSTGRES_PORT secret is required}"
+          : "${POSTGRES_DB:?POSTGRES_DB secret is required}"
+          : "${POSTGRES_USER:?POSTGRES_USER secret is required}"
+          : "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD secret is required}"
+
+          database_url="postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}"
+
+          secret_file="$(mktemp)"
+          printf 'DATABASE_URL=%s\n' "$database_url" > "$secret_file"
+
+          kubectl -n "$NAMESPACE" create secret generic billing-service-secret \
+            --from-env-file="$secret_file" \
+            --dry-run=client \
+            -o yaml | kubectl -n "$NAMESPACE" apply -f -
+
+          rm -f "$secret_file"
+
+      - name: Deploy Kubernetes manifests
+        env:
+          IMAGE_URI: ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:${{ github.sha }}
+          OVERLAY: ${{ github.ref_name == 'stag' && 'stag' || 'prod' }}
+          NAMESPACE: ${{ github.ref_name == 'stag' && vars.K8S_NAMESPACE_STAG || vars.K8S_NAMESPACE_PROD }}
+        run: |
+          kubectl kustomize "k8s/overlays/$OVERLAY" > /tmp/billing-service.yaml
+          sed -i "s#image: billing-service:latest#image: $IMAGE_URI#g" /tmp/billing-service.yaml
+          kubectl -n "$NAMESPACE" apply -f /tmp/billing-service.yaml
+          kubectl -n "$NAMESPACE" rollout status deployment/billing-service --timeout=180s
+
+      - name: Smoke test deployment
+        env:
+          NAMESPACE: ${{ github.ref_name == 'stag' && vars.K8S_NAMESPACE_STAG || vars.K8S_NAMESPACE_PROD }}
+        run: |
+          set -euo pipefail
+
+          kubectl -n "$NAMESPACE" port-forward --address 127.0.0.1 service/billing-service 8080:80 &
+          port_forward_pid="$!"
+          trap 'kill "$port_forward_pid" 2>/dev/null || true' EXIT
+
+          bunx wait-on --timeout 60000 http://127.0.0.1:8080/health
